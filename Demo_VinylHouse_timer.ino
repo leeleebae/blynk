@@ -19,15 +19,17 @@
 
 
 //#define BLYNK_DEBUG // Blynk 디버깅 모드 활성화
-#define APP_DEBUG
+//#define DEBUG_MODE
+#define TEST_MODE
+
 #define BLYNK_HEARTBEAT 30  // 30초마다 서버와 핑 체크,기본은 10초이다.
 
 #define BLYNK_PRINT Serial
-#define DHTPIN4 4      //  배전반의 이더넷 카드의 DHT22 센서가 연결 된 핀 번호
-#define DHTPINA 7      //  A동 DHT22 센서가 연결 된 핀 번호
-#define DHTPINB 8      //  B동 DHT22 센서가 연결 된 핀 번호
-#define DHTTYPE DHT22  //  DHT22 센서 사용   (DHT22 센서는 DHT22로 수정, DHT11일경우 DHT11)
-
+#define DHTPIN4 4           //  배전반의 이더넷 카드의 DHT22 센서가 연결 된 핀 번호
+#define DHTPINA 7           //  A동 DHT22 센서가 연결 된 핀 번호
+#define DHTPINB 8           //  B동 DHT22 센서가 연결 된 핀 번호
+#define DHTTYPE DHT22       //  DHT22 센서 사용   (DHT22 센서는 DHT22로 수정, DHT11일경우 DHT11)
+#define W5100_RESET_PIN 12  // W5100의 RESET 핀 (D12에 연결)
 
 #include <SPI.h>
 #include <Ethernet.h>
@@ -52,30 +54,12 @@ int setAutoMinusTemp = 10;
 int setAutoNotiTemp = 10;
 
 //실제 환경
-const unsigned long BaeJoneBaninterval = (1000L * 60 * 1);     //1분
-const unsigned long AHouseinterval = (1000L * 60 * 1);         //1분
-const unsigned long BHouseinterval = (1000L * 60 * 1);         //1분
-const unsigned long WaterScheduleinterval = (1000L * 60 * 2);  //2분
+const unsigned long connectionCheckinterval = (1000L * 1);  //1초
 
-//test환경
-// const unsigned long BaeJoneBaninterval = (1000L * 5);     //5초
-// const unsigned long AHouseinterval = (1000L * 5);         //5초
-// const unsigned long BHouseinterval = (1000L * 5);         //5초
-// const unsigned long WaterScheduleinterval = (1000L * 3);  //3초 //test버전
-
-const unsigned long timerRemainginterval = (1000L * 2);  //2초
-const unsigned long timerNotificationinterval = (500L);  //0.5초
-
-unsigned long lastExeBaeJoneBanTime = 0;  // 마지막 실행 시간
-unsigned long lastExeAHouseTime = 0;      // 마지막 실행 시간
-unsigned long lastExeBHouseTime = 0;      // 마지막 실행 시간
-unsigned long lastExeScheduleTime = 0;    // 마지막 실행 시간
-
-
-byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+static uint8_t mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 EthernetUDP ntpUDP;
-const long utcOffsetInSeconds = 32400;  //Korea UTC+09 9*60*60 = 32400
-NTPClient timeClient(ntpUDP, "asia.pool.ntp.org", utcOffsetInSeconds);
+const long utcOffset = 9 * 3600;  // 한국 시간(UTC+9) 기준
+NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffset);
 
 #define AUTO_MODE true
 #define MANU_MODE false
@@ -100,13 +84,20 @@ String selectedWeekB2;
 
 
 CFNET cfnet;
-BlynkTimer timerBaeJoneBan;
-BlynkTimer timerAHouse;
-BlynkTimer timerBHouse;
-BlynkTimer timerSchedule;
-BlynkTimer timerRemaingTime;
-BlynkTimer timerNotification;
 
+BlynkTimer connectionTimer;  // 인터넷 연결 체크 타이머
+unsigned long lastConnectionTime = 0;
+const unsigned long connectionTimeout = 1000 * 5;  // 5초 제한 시간
+
+unsigned long lastNotificationTime = 0;
+const unsigned long notificationTimeout = 1000 * 1;  // 10초 제한 시간
+
+BlynkTimer ntpUpdateTimer;                                 //NTP update timer
+const unsigned long ntpUpdateinterval = (1000L * 60 * 5);  //5분
+// 시간 관리 변수
+unsigned long lastUpdateMillis = 0;
+unsigned long currentMillis = 0;
+unsigned long elapsedSeconds = 0;
 
 DHT dhtE(DHTPIN4, DHTTYPE);
 DHT dhtA(DHTPINA, DHTTYPE);
@@ -249,16 +240,12 @@ void setInitialMode() {
   A동 배전반의 온도 상태에 따라 냉각팬을 ON/OFF, 타이머는 Setup함수 정함
   1.40이상은 냉각팬 ON
   2.냉각팬이 ON 상태에서 30~40도인경우 계속 식히기 위해서 그대로 냉각팬을 ON
-  3.냉각팬이 OFF 상태에서 30~40도인경우 계속 식히기 위해서 그대로 냉각팬을 OFF
+  3.냉각팬이 OFF 상태에서 30~40도인경우 계속 식히기 위해서 그대로 냉각팬waring을 OFF
   3.온도가 30도 미만인경우 냉각펜 OFF
   4.온도가 45도 넘으면 스마트폰으로 통지를 보낸다.
 */
 
 void sensorBaeJoneBan() {
-    //테스트 logEvent
-  //Serial.println("sensorBaeJoneBan infoalert");
-  //Blynk.logEvent("infoalert", "sensorBaeJoneBan");
-  //timerNotification.setTimeout(timerNotificationinterval, []() {sendNofication("infoalert", "sensorBaeJoneBan   !!!infoalert!!!");});
 
   int t = static_cast<int>(dhtE.readTemperature());  // 섭씨 온도,, DHT11경우 int, 만약 DHT22센서 사용시 float형으로 바꿀 것
   int h = static_cast<int>(dhtE.readHumidity());
@@ -271,14 +258,19 @@ void sensorBaeJoneBan() {
 
   if (SensorErrorCnt_BaeJoneBan == TEMP_ERR_CNT)  //온도 센서 에러가 10번 이상 나오면 경보 알람을 보낸다.
   {
+#ifdef DEBUG_MODE
     Serial.println("배전반의 온도습도센서의 데이타가 올바르지 않습니다. 온도습도센서를 확인해주세요. 기타기능 > 시스탬리부팅을 3번 클릭 해보시길 바랍니다.");
-    //Blynk.logEvent("waringalert", "배전반의 온도습도센서의 데이타가 올바르지 않습니다. 온도습도센서를 확인해주세요. 기타기능 > 시스탬리부팅을 3번 클릭 해보시길 바랍니다.");
+#endif
+    Blynk.logEvent("waringalert", "배전반의 온도습도센서의 데이타가 올바르지 않습니다. 온도습도센서를 확인해주세요. 기타기능 > 시스탬리부팅을 3번 클릭 해보시길 바랍니다.");
     SensorErrorCnt_BaeJoneBan = 0;
     return;
   }
-
+#ifdef DEBUG_MODE
   Serial.println("현재 배전반의 온도:" + String(t));
-  //Serial.println("현재 배전반의 습도:" + String(h));
+  Serial.println("현재 배전반의 습도:" + String(h));
+#endif
+
+
 
   //40도 이상일대 냉각팬을 켜고 다시 30도 이하로 떨어질때 냉각팬을 끈다.
   if (t >= (setFanRunTemp - setFanMinusTemp) && t < setFanRunTemp) {
@@ -288,15 +280,19 @@ void sensorBaeJoneBan() {
       // 온도 경보 알람을 보낸다.
       FAN_RUNING = true;
       cfnet.digitalWrite(0, 0, HIGH);  //냉각팬을 켠다.
+#ifdef DEBUG_MODE
       Serial.println("배전판의 냉각팬을 작동시킵니다.");
-      //Blynk.logEvent("infoalert", "배전판의 냉각팬을 작동시킵니다. 현재 온도: " + String(t) + "°C");
+#endif
+      Blynk.logEvent("infoalert", "배전판의 냉각팬을 작동시킵니다. 현재 온도: " + String(t) + "°C");
     }
   } else {  //설정한 값, 설정한값 -10 가 아닌 온도이고 결론 냉각팬을 끄는 온도이다.
 
     if (FAN_RUNING) {                 //현재 알람이 ON상태라면 알람해제 되었습니다.
       cfnet.digitalWrite(0, 0, LOW);  //냉각팬을 끈다.
+#ifdef DEBUG_MODE
       Serial.println("배전반의 냉각팬을 중지했습니다.");
-      //Blynk.logEvent("infoalert", "배전반의 냉각팬을 중지했습니다. 현재 온도: " + String(t) + "°C");
+#endif
+      Blynk.logEvent("infoalert", "배전반의 냉각팬을 중지했습니다. 현재 온도: " + String(t) + "°C");
       FAN_RUNING = false;
     }
   }
@@ -306,19 +302,20 @@ void sensorBaeJoneBan() {
     if (!bBaeJoneBanTempOver_Alarmsend) {  //처음 경보 Send 했다면
       // 온도 경보 알람을 보낸다.
       bBaeJoneBanTempOver_Alarmsend = true;
+#ifdef DEBUG_MODE
       Serial.println("배전반의 온도가 높습니다. 확인해주세요");
-      //Blynk.logEvent("waringalert", "배전반의 온도가 높습니다. 확인해주세요." + String(t) + "°C");
+#endif
+      Blynk.logEvent("waringalert", "배전반의 온도가 높습니다. 확인해주세요." + String(t) + "°C");
     }
   } else {
     if (bBaeJoneBanTempOver_Alarmsend) {  //현재 알람이 ON상태라면 알람해제 되었습니다.
+#ifdef DEBUG_MODE
       Serial.println("배전반의 온도가 정상범위로 돌아왔습니다.");
-      //Blynk.logEvent("infoalert", "배전반의 온도가 정상범위로 돌아왔습니다." + String(t) + "°C");
+#endif
+      Blynk.logEvent("infoalert", "배전반의 온도가 정상범위로 돌아왔습니다." + String(t) + "°C");
       bBaeJoneBanTempOver_Alarmsend = false;
     }
   }
-
-  //Timer 남은시간 체크
-  lastExeBaeJoneBanTime = millis();  // 타이머 실행 시점 저장
 }
 
 
@@ -352,10 +349,6 @@ void AHouse_WindowClose() {
 //A동 하우스 온도 습도 데이타를 블링크 서버로 보낸다. 타임은 setup 함수에서 정의됨
 //자동설정모드이라면 사용자가 설정한 온도에서 측면을 개방한다.
 void sendSensorAHouse() {
-   //테스트 logEvent
-  //Serial.println("sendSensorAHouse infoalert");
-  //Blynk.logEvent("infoalert", "sendSensorAHouse");
-  //timerNotification.setTimeout(timerNotificationinterval, []() {sendNofication("infoalert", "sendSensorAHouse   !!!infoalert!!!");});
 
 
   //온도 습도를 float을 int로 변환 (소수점 절삭)
@@ -371,15 +364,17 @@ void sendSensorAHouse() {
 
   if (SensorErrorCnt_AHouse == TEMP_ERR_CNT)  //온도 센서 에러가 10번 이상 나오면 경보 알람을 보낸다.
   {
+#ifdef DEBUG_MODE
     Serial.println("A동 하우스의 온도습도센서의 데이타가 올바르지 않습니다. 온도습도센서를 확인해주세요. 기타기능 > 시스탬리부팅을 3번 클릭 해보시길 바랍니다.");
-    //Blynk.logEvent("waringalert", "A동 하우스의 온도습도센서의 데이타가 올바르지 않습니다. 온도습도센서를 확인해주세요. 기타기능 > 시스탬리부팅을 3번 클릭 해보시길 바랍니다.");
+#endif
+    Blynk.logEvent("waringalert", "A동 하우스의 온도습도센서의 데이타가 올바르지 않습니다. 온도습도센서를 확인해주세요. 기타기능 > 시스탬리부팅을 3번 클릭 해보시길 바랍니다.");
     SensorErrorCnt_AHouse = 0;
     return;
   }
-
+#ifdef DEBUG_MODE
   Serial.println("현재 A동하우스 온도 :" + String(t));
-  //Serial.println("현재 A동하우스 습도 :" + String(h));
-
+  Serial.println("현재 A동하우스 습도 :" + String(h));
+#endif
 
   //전온도값(prevAHouse_temp)에 현재의 온도가 없다면 새로운 현재온도값(currentAHouse_temp)을 만든다.
   if (!containsSubstring(prevAHouse_temp, String(t))) {
@@ -390,12 +385,15 @@ void sendSensorAHouse() {
 
       currentAHouse_temp = String(t - 1) + "," + String(t) + "," + String(t + 1);
     } else {
+#ifdef DEBUG_MODE
       Serial.println("sendSensorAHouse ERROR : 정의 되지 않는 else 입니다.");
+#endif
     }
   }
+#ifdef DEBUG_MODE
   Serial.println("A동 하우스 과거온도:" + prevAHouse_temp);
   Serial.println("A동 하우스 현재온도:" + currentAHouse_temp);
-
+#endif
   if (prevAHouse_temp != currentAHouse_temp) {
     AHouse_temp_sendOn = false;
     prevAHouse_temp = currentAHouse_temp;
@@ -405,14 +403,20 @@ void sendSensorAHouse() {
     AHouse_temp_sendOn = true;
     Blynk.virtualWrite(V3, t);  // 온도위젯에 온도전달
     Blynk.virtualWrite(V4, h);  // 습도위젯에 습도전달
+#ifdef DEBUG_MODE
     Serial.println("A동 하우스 온도 위젯의 값을 변경하였습니다.");
+#endif
   }
 
 
 
   if (RUN_MODE == AUTO_MODE) {  //자동모드이리면
 
-    //Serial.println("setUserOpenTemp :" + String(setUserOpenTemp));
+
+#ifdef DEBUG_MODE
+    Serial.println("setUserOpenTemp :" + String(setUserOpenTemp));
+#endif
+
 
     //개페온도 - 마이너스 온도 사이는 그대로 둔다.
     if (t >= (setUserOpenTemp - setAutoMinusTemp) && t < setUserOpenTemp) {
@@ -422,8 +426,10 @@ void sendSensorAHouse() {
         AHouse_WindowOpen();
         Blynk.virtualWrite(V10, HIGH);  //화면자동개폐LED ON
         AHouse_WindowOpen_sendOn = true;
+#ifdef DEBUG_MODE
         Serial.println("A동의 창을 열어습니다. 현재 온도: " + String(t) + "°C");
-        //Blynk.logEvent("infoalert", "A동의 창을 열어습니다. 현재 온도: " + String(t) + "°C");
+#endif
+        Blynk.logEvent("infoalert", "A동의 창을 열어습니다. 현재 온도: " + String(t) + "°C");
       }
       AHouse_WindowClose_sendOn = false;
 
@@ -433,8 +439,10 @@ void sendSensorAHouse() {
         AHouse_WindowClose();
         Blynk.virtualWrite(V10, LOW);  //화면자동개폐LED OFF
         AHouse_WindowClose_sendOn = true;
+#ifdef DEBUG_MODE
         Serial.println("A동의 창을 닫았습니다. 현재 온도: " + String(t) + "°C");
-        //Blynk.logEvent("infoalert", "A동의 창을 닫았습니다. 현재 온도: " + String(t) + "°C");
+#endif
+        Blynk.logEvent("infoalert", "A동의 창을 닫았습니다. 현재 온도: " + String(t) + "°C");
       }
       AHouse_WindowOpen_sendOn = false;
     }
@@ -447,19 +455,20 @@ void sendSensorAHouse() {
     if (!AHouse_setUserOpenTempOver_Alarmsend) {  //처음 경보 Send 했다면
       // 온도 경보 알람을 보낸다.
       AHouse_setUserOpenTempOver_Alarmsend = true;
+#ifdef DEBUG_MODE
       Serial.println("A동 하우스의 온도가 높습니다. 확인해주세요. 현재 온도: " + String(t) + "°C");
-      //Blynk.logEvent("waringalert", "A동 하우스의 온도가 높습니다. 확인해주세요. 현재 온도: " + String(t) + "°C");
+#endif
+      Blynk.logEvent("waringalert", "A동 하우스의 온도가 높습니다. 확인해주세요. 현재 온도: " + String(t) + "°C");
     }
   } else {
     if (AHouse_setUserOpenTempOver_Alarmsend) {  //현재 알람이 ON상태라면 알람해제 되었습니다.
+#ifdef DEBUG_MODE
       Serial.println("A동 하우스의 온도가 정상범위로 돌아왔습니다. 현재 온도: " + String(t) + "°C");
-      //Blynk.logEvent("infoalert", "A동 하우스의 온도가 정상범위로 돌아왔습니다. 현재 온도: " + String(t) + "°C");
+#endif
+      Blynk.logEvent("infoalert", "A동 하우스의 온도가 정상범위로 돌아왔습니다. 현재 온도: " + String(t) + "°C");
       AHouse_setUserOpenTempOver_Alarmsend = false;
     }
   }
-
-  //Timer 남은시간 체크
-  lastExeAHouseTime = millis();  // 타이머 실행 시점 저장
 }
 
 //A동 관수 스위치 On/Off했을때
@@ -469,7 +478,7 @@ BLYNK_WRITE(V6) {
   cfnet.digitalWrite(0, 6, pinValue);
 }
 
-//A동 오전관수타이머의 Start/Stop의 시간을 저장한다.
+//A동 오전관수타이머의 Start/Stop의 시간을 저장한다. blynk요일을  NTC요일로 변경한다.
 BLYNK_WRITE(V7) {
   startTimerA1 = param[0].asStr();
   endTimerA1 = param[1].asStr();
@@ -528,10 +537,6 @@ BLYNK_WRITE(V20) {
 
 //B동 하우스 온도 습도 데이타를 블링크 서버로 보낸다. 타임은 setup 함수에서 정의됨
 void sendSensorBHouse() {
-  //테스트 logEvent
-  //Serial.println("sendSensorBHouse infoalert");
-  //Blynk.logEvent("infoalert", "sendSensorBHouse");
-  //timerNotification.setTimeout(timerNotificationinterval, []() {sendNofication("infoalert", "sendSensorBHouse   !!!infoalert!!!");});
 
   //온도 습도를 float을 int로 변환 (소수점 절삭)
   int t = static_cast<int>(dhtB.readTemperature());  // 섭씨 온도, DHT11경우 int, 만약 DHT22센서 사용시 float형으로 바꿀 것
@@ -539,7 +544,9 @@ void sendSensorBHouse() {
 
 
   if (isnan(t) || isnan(h)) {
-    //Serial.println("Failed to read from SensorBHouse DHT sensor!");
+#ifdef DEBUG_MODE
+    Serial.println("Failed to read from SensorBHouse DHT sensor!");
+#endif
     SensorErrorCnt_BHouse++;
     return;
   }
@@ -547,14 +554,18 @@ void sendSensorBHouse() {
 
   if (SensorErrorCnt_BHouse == TEMP_ERR_CNT)  //온도 센서 에러가 10번 이상 나오면 경보 알람을 보낸다.
   {
+#ifdef DEBUG_MODE
     Serial.println("B동 하우스의 온도습도센서의 데이타가 올바르지 않습니다. 온도습도센서를 확인해주세요. 기타기능 > 시스탬리부팅을 3번 클릭 해보시길 바랍니다.");
-    //Blynk.logEvent("waringalert", "B동 하우스의 온도습도센서의 데이타가 올바르지 않습니다. 온도습도센서를 확인해주세요. 기타기능 > 시스탬리부팅을 3번 클릭 해보시길 바랍니다.");
+#endif
+    Blynk.logEvent("waringalert", "B동 하우스의 온도습도센서의 데이타가 올바르지 않습니다. 온도습도센서를 확인해주세요. 기타기능 > 시스탬리부팅을 3번 클릭 해보시길 바랍니다.");
     SensorErrorCnt_BHouse = 0;
     return;
   }
-
+#ifdef DEBUG_MODE
   Serial.println("현재 B동하우스 온도:" + String(t));
-  //Serial.println("BHouse Hum:" + String(h));
+  Serial.println("현재 B동하우스 습도:" + String(h));
+#endif
+
 
 
   //전온도값(prevBHouse_temp)에 현재의 온도가 없다면 새로운 현재온도값(currentBHouse_temp)을 만든다.
@@ -569,9 +580,10 @@ void sendSensorBHouse() {
       Serial.println("sendSensorBHouse ERROR : 정의 되지 않는 else 입니다.");
     }
   }
+#ifdef DEBUG_MODE
   Serial.println("B동 하우스 과거온도:" + prevBHouse_temp);
   Serial.println("B동 하우스 현재온도:" + currentBHouse_temp);
-
+#endif
   if (prevBHouse_temp != currentBHouse_temp) {
     BHouse_temp_sendOn = false;
     prevBHouse_temp = currentBHouse_temp;
@@ -581,7 +593,9 @@ void sendSensorBHouse() {
     BHouse_temp_sendOn = true;
     Blynk.virtualWrite(V21, t);  // 온도위젯에 온도전달
     Blynk.virtualWrite(V22, h);  // 습도위젯에 습도전달
+#ifdef DEBUG_MODE
     Serial.println("B동 하우스 온도 위젯의 값을 변경하였습니다.");
+#endif
   }
 
 
@@ -597,8 +611,10 @@ void sendSensorBHouse() {
         Blynk.virtualWrite(V28, HIGH);  //화면자동개폐LED ON
         BHouse_WindowOpen_sendOn = true;
         //알람을 보내는 코드를 만든다.
-        //Blynk.logEvent("infoalert", "B동의 창을 열어습니다. 현재 온도: " + String(t) + "°C");
+        Blynk.logEvent("infoalert", "B동의 창을 열어습니다. 현재 온도: " + String(t) + "°C");
+#ifdef DEBUG_MODE
         Serial.println("B동의 창을 열어습니다. 현재 온도: " + String(t) + "°C");
+#endif
       }
       BHouse_WindowClose_sendOn = false;
 
@@ -609,8 +625,10 @@ void sendSensorBHouse() {
         Blynk.virtualWrite(V28, LOW);  //화면자동개폐LED OFF
         BHouse_WindowClose_sendOn = true;
         //알람을 보내는 코드를 만든다.
-        //Blynk.logEvent("infoalert", "B동의 창을 닫았습니다. 현재 온도: " + String(t) + "°C");
+        Blynk.logEvent("infoalert", "B동의 창을 닫았습니다. 현재 온도: " + String(t) + "°C");
+#ifdef DEBUG_MODE
         Serial.println("B동의 창을 닫았습니다. 현재 온도: " + String(t) + "°C");
+#endif
       }
       BHouse_WindowOpen_sendOn = false;
     }
@@ -623,20 +641,21 @@ void sendSensorBHouse() {
     if (!BHouse_setUserOpenTempOver_Alarmsend) {  //처음 경보 Send 했다면
       // 온도 경보 알람을 보낸다.
       BHouse_setUserOpenTempOver_Alarmsend = true;
-      //Blynk.logEvent("waringalert", "B동 하우스의 온도가 높습니다. 확인해주세요." + String(t) + "°C");
+      Blynk.logEvent("waringalert", "B동 하우스의 온도가 높습니다. 확인해주세요." + String(t) + "°C");
+#ifdef DEBUG_MODE
       Serial.println("B동 하우스의 온도가 높습니다. 확인해주세요." + String(t) + "°C");
+#endif
     }
   } else {
     if (BHouse_setUserOpenTempOver_Alarmsend) {  //현재 알람이 ON상태라면
                                                  //알람해제 되었습니다.
+#ifdef DEBUG_MODE
       Serial.println("B동 하우스의 온도가 정상범위로 돌아왔습니다." + String(t) + "°C");
-      //Blynk.logEvent("infoalert", "B동 하우스의 온도가 정상범위로 돌아왔습니다." + String(t) + "°C");
+#endif
+      Blynk.logEvent("infoalert", "B동 하우스의 온도가 정상범위로 돌아왔습니다." + String(t) + "°C");
       BHouse_setUserOpenTempOver_Alarmsend = false;
     }
   }
-
-  //Timer 남은시간 체크
-  lastExeBHouseTime = millis();  // 타이머 실행 시점 저장
 }
 
 
@@ -679,12 +698,16 @@ BLYNK_WRITE(V31) {
 
   switch (switchValue) {
     case 0:
-      Serial.println("편집/읽기모드: 편집");         //편집
+#ifdef DEBUG_MODE
+      Serial.println("편집/읽기모드: 편집");  //편집
+#endif
       Blynk.setProperty(V30, "isDisabled", false);   //개폐온도
       Blynk.setProperty(V127, "isDisabled", false);  //운전모드 Enable
       break;
     case 1:
-      Serial.println("편집/읽기모드: 읽기");        //읽기
+#ifdef DEBUG_MODE
+      Serial.println("편집/읽기모드: 읽기");  //읽기
+#endif
       Blynk.setProperty(V30, "isDisabled", true);   //개폐온도 Disalbe
       Blynk.setProperty(V127, "isDisabled", true);  //운전모드 Disalbe
       break;
@@ -708,11 +731,15 @@ BLYNK_WRITE(V126) {
 
   switch (selectedValue) {
     case 0:  //빈번한 온도수집
+#ifdef DEBUG_MODE
       Serial.println("빈번한 온도수집");
+#endif
       TempCollectionMode = tempfrequentMode;
       break;
     case 1:
+#ifdef DEBUG_MODE
       Serial.println("적당한 온도수집");
+#endif
       TempCollectionMode = tempSometimeMode;
       break;
     case 2:  //A동 조명 켜기
@@ -724,13 +751,16 @@ BLYNK_WRITE(V126) {
         Blynk.setProperty(V32, "label", "조명:A");
       }
       Blynk.virtualWrite(V32, HIGH);
-
+#ifdef DEBUG_MODE
       Serial.println("A동 조명 켜기");
+#endif
       break;
     case 3:  //A동 조명 끄기
       bAHouse_Light = false;
       cfnet.digitalWrite(0, 5, LOW);
+#ifdef DEBUG_MODE
       Serial.println("A동 조명 끄기");
+#endif
       if (bBHouse_Light) {
         Blynk.setProperty(V32, "label", "조명:B");
         Blynk.virtualWrite(V32, HIGH);
@@ -742,7 +772,9 @@ BLYNK_WRITE(V126) {
       break;
     case 4:  //B동 조명 켜기
       bBHouse_Light = true;
+#ifdef DEBUG_MODE
       Serial.println("B동 조명 켜기");
+#endif
       cfnet.digitalWrite(1, 5, HIGH);
       if (bAHouse_Light) {
         Blynk.setProperty(V32, "label", "조명:A-B");
@@ -762,22 +794,25 @@ BLYNK_WRITE(V126) {
         Blynk.setProperty(V32, "label", "조명");
         Blynk.virtualWrite(V32, LOW);
       }
-
+#ifdef DEBUG_MODE
       Serial.println("B동 조명 끄기");
+#endif
       break;
     case 6:  //A동 카메라 찍기
+#ifdef DEBUG_MODE
       Serial.println("A동 카메라 찍기");
+#endif
       break;
     case 7:  //B동 카메라 찍기
+#ifdef DEBUG_MODE
       Serial.println("B동 카메라 찍기");
+#endif
       break;
     case 8:  //시스탬 리부팅
       touchRebootCount++;
       if (touchRebootCount == 3) {
-        Serial.println("시스탬을 리부팅합니다.");
-        wdt_enable(WDTO_15MS);  // 15ms 후 리부팅
-        while (1)
-          ;  // 무한 루프 (watchdog 타이머 동작)
+        Serial.println("사용자가 시스탬을 강제로  리부팅합니다.");
+        reboot();
         break;
       }
       break;
@@ -837,60 +872,44 @@ BLYNK_WRITE(V127) {
   }
 }
 
-/*
-  BLYNK_CONNECTED() 함수는 재부팅 되거나 재연결될때 실행된다.
-  모든값은 초기값으로 재설정된다.
-  
-*/
-BLYNK_CONNECTED() {
-  currentInitMode = true;
-  Serial.println("서버 연결시 -- setInitialMode");
-  //Blynk.logEvent("infoalert", "서버와 연결되었습니다.");
-  setInitialMode();
+
+
+
+//NTP요일을 Blynk요일로 변경
+int convertNtpDayToBlynkDay(int ntpDay) {
+  return (ntpDay == 0) ? 7 : ntpDay;  // 일요일(0) → 7, 나머지는 그대로
 }
-
-void reconnectEthernet() {
-  Serial.println("Ethernet 재설정 중...");
-  //Blynk.logEvent("waringalert", "서버와 연결이 끊겼습니다. 연결을 재시도 하고 있습니다.");
-
-  // 1. Ethernet 모듈 초기화
-  if (Ethernet.begin(mac) == 0) {
-    Serial.println("Ethernet DHCP 실패! 수동 IP 설정 필요.");
-  }
-  Ethernet.maintain();
-  delay(1000);
-
-  // 2. Blynk 다시 연결
-  Blynk.config(BLYNK_AUTH_TOKEN);
-  if (Blynk.connect()) {
-    Serial.println("Blynk 서버 재연결 성공!");
-  } else {
-    Serial.println("Blynk 서버 재연결 실패!");
-  }
-}
-
 
 
 /*
   0.자동모드 이고 요일이 맞고 시간이 맞으면 작동한다.
-  1.요일은  일(7),월(1),화(2),수(3),목(4),금(5),토(6) 이다.
+  1.Blynk 요일은  일(7),월(1),화(2),수(3),목(4),금(5),토(6) 이다.
 */
 void waterTimeSchedule() {
-   //테스트 logEvent
-  //Serial.println("waterTimeSchedule infoalert");
-  //Blynk.logEvent("infoalert", "waterTimeSchedule");
-  //timerNotification.setTimeout(timerNotificationinterval, []() {sendNofication("infoalert", "waterTimeSchedule   !!!infoalert!!!");});
 
   if (RUN_MODE == AUTO_MODE) {
-    timeClient.update();
-    int HH = timeClient.getHours();
-    int MM = timeClient.getMinutes();
-    int SS = timeClient.getSeconds();
+    currentMillis = millis();
+    elapsedSeconds += (currentMillis - lastUpdateMillis) / 1000;  // 초 단위 증가
+    lastUpdateMillis = currentMillis;
+    // 현재 시간 계산
+    unsigned long epochTime = elapsedSeconds;
+
+    int HH = (epochTime / 3600) % 24;
+    int MM = (epochTime / 60) % 60;
+    int SS = epochTime % 60;
     long gettime = (3600L * HH) + (60L * MM) + SS;
 
-    int server_day = timeClient.getDay();
+    int server_day = convertNtpDayToBlynkDay(timeClient.getDay());  //ntp요일을 blynk요일로 변경
 
     server_time = String(gettime);
+
+#ifdef DEBUG_MODE
+    Serial.println("startTimerA1:" + startTimerA1);
+    Serial.println("server_time:" + server_time);
+    Serial.println("endTimerA1:" + endTimerA1);
+    Serial.println("server_day:" + String(server_day));
+    Serial.println("selectedWeekA1:" + String(selectedWeekA1));
+#endif
 
     //Timer1
     if (containsSubstring(selectedWeekA1, String(server_day)) && (startTimerA1.toInt() <= server_time.toInt()) && (endTimerA1.toInt() >= server_time.toInt())) {
@@ -902,7 +921,9 @@ void waterTimeSchedule() {
       if (!AHouse_WaterWiget1_On) {  //Wignet이 OFF일때만
         AHouse_WaterWiget1_On = true;
         Blynk.setProperty(V7, "color", "#FF0000");  // 빨간색 (#RRGGBB 형식)
+#ifdef DEBUG_MODE
         Serial.println("A동 관수타이머1 위젯의 색깔을 변경하였습니다.");
+#endif
       }
 
       AHouse_WaterWiget1_Change = false;
@@ -914,7 +935,9 @@ void waterTimeSchedule() {
       if (!AHouse_WaterWiget1_Change) {
         AHouse_WaterWiget1_Change = true;
         Blynk.setProperty(V7, "color", "#006400");  //녹색 (#RRGGBB 형식)
+#ifdef DEBUG_MODE
         Serial.println("A동 관수타이머1 위젯의 색깔을 복원하였습니다.");
+#endif
       }
     }
 
@@ -928,7 +951,9 @@ void waterTimeSchedule() {
       if (!AHouse_WaterWiget2_On) {  //Wignet이 OFF일때만
         AHouse_WaterWiget2_On = true;
         Blynk.setProperty(V8, "color", "#FF0000");  // 빨간색 (#RRGGBB 형식)
+#ifdef DEBUG_MODE
         Serial.println("A동 관수타이머2 위젯의 색깔을 변경하였습니다.");
+#endif
       }
 
       AHouse_WaterWiget2_Change = false;
@@ -940,7 +965,9 @@ void waterTimeSchedule() {
       if (!AHouse_WaterWiget2_Change) {
         AHouse_WaterWiget2_Change = true;
         Blynk.setProperty(V8, "color", "#006400");  //녹색 (#RRGGBB 형식)
+#ifdef DEBUG_MODE
         Serial.println("A동 관수타이머2 위젯의 색깔을 복원하였습니다.");
+#endif
       }
     }
 
@@ -948,8 +975,10 @@ void waterTimeSchedule() {
       if (!AHouse_WaterRelay_On) {                         // Relay가 Off일때만 On시킨다.
         AHouse_WaterRelay_On = true;
         cfnet.digitalWrite(0, 6, HIGH);
-        //Blynk.logEvent("infoalert", "A동에 관수를 시작하였습니다.");
+        Blynk.logEvent("infoalert", "A동에 관수를 시작하였습니다.");
+#ifdef DEBUG_MODE
         Serial.println("A동에 관수를 시작하였습니다.");
+#endif
       }
       AHouse_WaterRelay_Change = false;
     } else {
@@ -957,8 +986,10 @@ void waterTimeSchedule() {
       if (!AHouse_WaterRelay_Change) {
         AHouse_WaterRelay_Change = true;
         cfnet.digitalWrite(0, 6, LOW);
-        //Blynk.logEvent("infoalert", "A동에 관수를 종료하였습니다.");
+        Blynk.logEvent("infoalert", "A동에 관수를 종료하였습니다.");
+#ifdef DEBUG_MODE
         Serial.println("A동에 관수를 종료하였습니다.");
+#endif
       }
     }
 
@@ -972,7 +1003,9 @@ void waterTimeSchedule() {
       if (!BHouse_WaterWiget3_On) {  //Wignet이 OFF일때만
         BHouse_WaterWiget3_On = true;
         Blynk.setProperty(V25, "color", "#FF0000");  // 빨간색 (#RRGGBB 형식)
+#ifdef DEBUG_MODE
         Serial.println("B동 관수타이머3 위젯의 색깔을 변경하였습니다.");
+#endif
       }
 
       BHouse_WaterWiget3_Change = false;
@@ -984,7 +1017,9 @@ void waterTimeSchedule() {
       if (!BHouse_WaterWiget3_Change) {
         BHouse_WaterWiget3_Change = true;
         Blynk.setProperty(V25, "color", "#006400");  //녹색 (#RRGGBB 형식)
+#ifdef DEBUG_MODE
         Serial.println("B동 관수타이머3 위젯의 색깔을 복원하였습니다.");
+#endif
       }
     }
 
@@ -998,7 +1033,9 @@ void waterTimeSchedule() {
       if (!BHouse_WaterWiget4_On) {  //Wignet이 OFF일때만
         BHouse_WaterWiget4_On = true;
         Blynk.setProperty(V26, "color", "#FF0000");  // 빨간색 (#RRGGBB 형식)
+#ifdef DEBUG_MODE
         Serial.println("B동 관수타이머4 위젯의 색깔을 변경하였습니다.");
+#endif
       }
 
       BHouse_WaterWiget4_Change = false;
@@ -1010,7 +1047,9 @@ void waterTimeSchedule() {
       if (!BHouse_WaterWiget4_Change) {
         BHouse_WaterWiget4_Change = true;
         Blynk.setProperty(V26, "color", "#006400");  //녹색 (#RRGGBB 형식)
+#ifdef DEBUG_MODE
         Serial.println("B동 관수타이머4 위젯의 색깔을 복원하였습니다.");
+#endif
       }
     }
 
@@ -1018,8 +1057,10 @@ void waterTimeSchedule() {
       if (!BHouse_WaterRelay_On) {                         // Relay가 Off일때만 On시킨다.
         BHouse_WaterRelay_On = true;
         cfnet.digitalWrite(1, 6, HIGH);
-        //Blynk.logEvent("infoalert", "B동하우스에 관수를 시작하였습니다.");
+        Blynk.logEvent("infoalert", "B동하우스에 관수를 시작하였습니다.");
+#ifdef DEBUG_MODE
         Serial.println("B동하우스에 관수를 시작하였습니다.");
+#endif
       }
       BHouse_WaterRelay_Change = false;
     } else {
@@ -1027,80 +1068,83 @@ void waterTimeSchedule() {
       if (!BHouse_WaterRelay_Change) {
         BHouse_WaterRelay_Change = true;
         cfnet.digitalWrite(1, 6, LOW);
-        //Blynk.logEvent("infoalert", "B동하우스에 관수를 종료하였습니다.");
+        Blynk.logEvent("infoalert", "B동하우스에 관수를 종료하였습니다.");
+#ifdef DEBUG_MODE
         Serial.println("B동하우스에 관수를 종료하였습니다.");
+#endif
       }
     }
   }
-  //Timer 남은시간 체크
-  lastExeScheduleTime = millis();  // 타이머 실행 시점 저장
 }
 
-// 남은 시간 계산 및 Blynk 전송
-void sendRemainingTime() {
-  unsigned long elapsedBaeJoneBanTime = millis() - lastExeBaeJoneBanTime;
-  unsigned long elapsedAHouseTime = millis() - lastExeAHouseTime;
-  unsigned long elapsedBHouseTime = millis() - lastExeBHouseTime;
-  unsigned long elapsedScheduleTime = millis() - lastExeScheduleTime;
-  long remainingBaeJoneBanTime = BaeJoneBaninterval - elapsedBaeJoneBanTime;
-  long remainingAHouseTime = AHouseinterval - elapsedAHouseTime;
-  long remainingBHouseTime = BHouseinterval - elapsedBHouseTime;
-  long remainingScheduleTime = WaterScheduleinterval - elapsedScheduleTime;
+/*
+  BLYNK_CONNECTED() 함수는 재부팅 되거나 재연결될때 실행된다.
+  모든값은 초기값으로 재설정된다.
+  
+*/
+BLYNK_CONNECTED() {
+  currentInitMode = true;
 
-  if (remainingBaeJoneBanTime < 0) remainingBaeJoneBanTime = 0;  // 음수 방지
-  if (remainingAHouseTime < 0) remainingAHouseTime = 0;          // 음수 방지
-  if (remainingBHouseTime < 0) remainingBHouseTime = 0;          // 음수 방지
-  if (remainingScheduleTime < 0) remainingScheduleTime = 0;      // 음수 방지
+  Serial.println("서버와 연결되었습니다.");
+#ifdef DEBUG_MODE
+  Blynk.logEvent("waringalert", "서버와 연결되었습니다.");
+#endif
+  setInitialMode();
+}
 
+// 아두이노 메가 소프트웨어 재부팅 함수
+void reboot() {
+  asm volatile ("  jmp 0"); // 메가의 프로그램 카운터를 0으로 강제 이동
+}
+void checkConnection() {
+  if (!Blynk.connected()) {
+    Serial.println("Blynk 서버 연결 실패! 시스탬을 리부팅합니다.");
+    reboot();
+  } 
+}
 
-  Serial.println(" ---- remaining Time -----");
-  Serial.println("remainingBaeJoneBanTime 남은 시간: " + String(remainingBaeJoneBanTime / 1000));  //초 단위 출력
-  Serial.println("remainingAHouseTime 남은 시간: " + String(remainingAHouseTime / 1000));          //초 단위 출력
-  Serial.println("remainingBHouseTime 남은 시간: " + String(remainingBHouseTime / 1000));          //초 단위 출력
-  Serial.println("remainingScheduleTime 남은 시간: " + String(remainingScheduleTime / 1000));      //초 단위 출력
-  Serial.println(" ");
+void ntpUpateTime() {
+
+#ifdef DEBUG_MODE
+  Serial.println("NTP 업데이트 중...");
+#endif
+  timeClient.update();
+  elapsedSeconds = timeClient.getEpochTime();
 }
 
 void setup() {
-  // Debug console
+
   Serial.begin(115200);
   Ethernet.begin(mac);  // Ethernet 초기화
+  if (Ethernet.hardwareStatus() == EthernetNoHardware) {
+    Serial.println("이더넷 쉴드가 연결되지 않았습니다!");
+  }
+
 
   Blynk.begin(BLYNK_AUTH_TOKEN);
-
+  timeClient.begin();
+  timeClient.update();
+  lastUpdateMillis = millis();
+  elapsedSeconds = timeClient.getEpochTime();  // 현재 Epoch 시간 저장
 
   dhtE.begin();
   dhtA.begin();
   dhtB.begin();
 
-  // 일반적으로 Blynk에서 ESP32 보드(혹은 아두이노와 같은 보드)에게 매 1초마다
-  // 데이터를 요구하는 방식이지만, 아래와 같은 타이머(timer) 코드를 사용하면
-  // ESP32 보드에서 Blynk로 일방적으로 데이터를 보낼 수 있음.
+  ntpUpdateTimer.setInterval(ntpUpdateinterval, ntpUpateTime);            // 1초마다 연결 상태 확인
+  connectionTimer.setInterval(connectionCheckinterval, checkConnection);  // 1초마다 연결 상태 확인
+}
+
+void loop() {
+
+  Blynk.run();
+  ntpUpdateTimer.run();
+  connectionTimer.run();
 
   sensorBaeJoneBan();
   sendSensorAHouse();
   sendSensorBHouse();
   waterTimeSchedule();
 
-  timerBaeJoneBan.setInterval(BaeJoneBaninterval, sensorBaeJoneBan);
-  timerAHouse.setInterval(AHouseinterval, sendSensorAHouse);
-  timerBHouse.setInterval(BHouseinterval, sendSensorBHouse);
-  timerSchedule.setInterval(WaterScheduleinterval, waterTimeSchedule);
-  timerRemaingTime.setInterval(timerRemainginterval, sendRemainingTime);
-}
-
-
-
-void loop() {
-  if (!Blynk.connected()) {
-    reconnectEthernet();  // 연결이 끊어지면 다시 연결
-  }
-
-  Blynk.run();
-
-  timerBaeJoneBan.run();
-  timerAHouse.run();
-  timerBHouse.run();
-  timerSchedule.run();
-  timerRemaingTime.run();
+  Ethernet.maintain(); // W5100 이더넷 연결 유지
 }
