@@ -25,20 +25,19 @@
 #define BLYNK_HEARTBEAT 30  // 30초마다 서버와 핑 체크,기본은 10초이다.
 
 #define BLYNK_PRINT Serial
-#define DHTPIN4 4           //  배전반의 이더넷 카드의 DHT22 센서가 연결 된 핀 번호
-#define DHTPINA 7           //  A동 DHT22 센서가 연결 된 핀 번호
-#define DHTPINB 8           //  B동 DHT22 센서가 연결 된 핀 번호
-#define DHTTYPE DHT22       //  DHT22 센서 사용   (DHT22 센서는 DHT22로 수정, DHT11일경우 DHT11)
+#define DHTPIN4 4      //  배전반의 이더넷 카드의 DHT22 센서가 연결 된 핀 번호
+#define DHTPINA 7      //  A동 DHT22 센서가 연결 된 핀 번호
+#define DHTPINB 8      //  B동 DHT22 센서가 연결 된 핀 번호
+#define DHTTYPE DHT22  //  DHT22 센서 사용   (DHT22 센서는 DHT22로 수정, DHT11일경우 DHT11)
+
 #define W5100_RESET_PIN 12  // W5100의 RESET 핀 (D12에 연결)
 
 #include <SPI.h>
 #include <Ethernet.h>
 #include <BlynkSimpleEthernet.h>
 #include <DHT.h>
-#include "CFMEGA.h"
 #include <NTPClient.h>
-#include <avr/wdt.h>
-
+#include "CFMEGA.h"
 
 //메뉴 위젯에서 빈번한,적당한을 제외한 다른 기능을 클릭했을때 작동이 끝난후에는 빈번한,적당한 값을보여준다.
 int selectedtMenuWiget = 0;
@@ -57,6 +56,7 @@ int setAutoNotiTemp = 10;
 const unsigned long connectionCheckinterval = (1000L * 1);  //1초
 
 static uint8_t mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+IPAddress ip(192, 168, 1, 177);  // 사용할 고정 IP (변경 가능)
 EthernetUDP ntpUDP;
 const long utcOffset = 9 * 3600;  // 한국 시간(UTC+9) 기준
 NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffset);
@@ -140,7 +140,6 @@ boolean BHouse_WaterWiget4_Change = false;
 #define tempSometimeMode 1
 boolean TempCollectionMode = tempfrequentMode;
 
-#define REBOOT_PASSWORD "1234"
 
 
 
@@ -182,12 +181,6 @@ bool containsSubstring(String str, String target) {
   return str.indexOf(target) != -1;
 }
 
-//OTA
-BLYNK_WRITE(InternalPinOTA) {
-  String url = param.asString();  // OTA 업데이트 URL 수신
-  Blynk.disconnect();             // 서버 연결 끊기
-  // OTA 업데이트 시작 (HTTP 다운로드 및 적용)
-}
 
 /*
   초기값 모드 설정
@@ -812,7 +805,13 @@ BLYNK_WRITE(V126) {
       touchRebootCount++;
       if (touchRebootCount == 3) {
         Serial.println("사용자가 시스탬을 강제로  리부팅합니다.");
-        reboot();
+        Blynk.disconnect();
+#ifdef TEST_MODE
+        Blynk.logEvent("waringalert", "사용자가 시스탬을 강제로  리부팅합니다.");
+        delay(1000);
+#endif
+        resetW5100();
+        //rebootJmp();
         break;
       }
       break;
@@ -1084,8 +1083,9 @@ void waterTimeSchedule() {
 */
 BLYNK_CONNECTED() {
   currentInitMode = true;
-
-  Serial.println("서버와 연결되었습니다.");
+  Serial.println("-- 서버에 연결되었습니다. --");
+  Serial.print("연결된 IP 주소: ");
+  Serial.println(Ethernet.localIP());  // Ethernet 모듈의 IP 출력
 #ifdef DEBUG_MODE
   Blynk.logEvent("waringalert", "서버와 연결되었습니다.");
 #endif
@@ -1093,14 +1093,33 @@ BLYNK_CONNECTED() {
 }
 
 // 아두이노 메가 소프트웨어 재부팅 함수
-void reboot() {
-  asm volatile ("  jmp 0"); // 메가의 프로그램 카운터를 0으로 강제 이동
+void rebootJmp() {
+  Serial.println("시스탬을 rebootJmp 시킵니다.");
+  asm volatile("  jmp 0");  // 메가의 프로그램 카운터를 0으로 강제 이동
 }
+
+void resetW5100() {
+  Serial.println("시스탬을 reset 시킵니다.");
+  pinMode(W5100_RESET_PIN, OUTPUT);
+  digitalWrite(W5100_RESET_PIN, LOW);   // W5100 전원 끄기
+  delay(500);                           // 0.5초 대기
+  digitalWrite(W5100_RESET_PIN, HIGH);  // W5100 전원 켜기
+  delay(1000);                          // 안정화 시간 대기
+}
+
+
 void checkConnection() {
   if (!Blynk.connected()) {
-    Serial.println("Blynk 서버 연결 실패! 시스탬을 리부팅합니다.");
-    reboot();
-  } 
+
+    Serial.println("연결이 끊어져서 시스탬을 강제로  리부팅합니다.");
+    Blynk.disconnect();
+#ifdef TEST_MODE
+    Blynk.logEvent("waringalert", "연결이 끊어져서 시스탬을 강제로  리부팅합니다.");
+    delay(1000);
+#endif
+    resetW5100();
+    //rebootJmp();
+  }
 }
 
 void ntpUpateTime() {
@@ -1115,13 +1134,12 @@ void ntpUpateTime() {
 void setup() {
 
   Serial.begin(115200);
-  Ethernet.begin(mac);  // Ethernet 초기화
-  if (Ethernet.hardwareStatus() == EthernetNoHardware) {
-    Serial.println("이더넷 쉴드가 연결되지 않았습니다!");
-  }
+  Ethernet.begin(mac, ip);  // Ethernet 초기화
+  Serial.print("고정된 IP 주소: ");
+  Serial.println(Ethernet.localIP());  // Ethernet 모듈의 IP 출력
 
-
-  Blynk.begin(BLYNK_AUTH_TOKEN);
+  //고정된 IP을 받기위해 Blynk.begin 아닌 Blynk.config을 사용
+  Blynk.config(BLYNK_AUTH_TOKEN);
   timeClient.begin();
   timeClient.update();
   lastUpdateMillis = millis();
@@ -1146,5 +1164,5 @@ void loop() {
   sendSensorBHouse();
   waterTimeSchedule();
 
-  Ethernet.maintain(); // W5100 이더넷 연결 유지
+  Ethernet.maintain();  // W5100 이더넷 연결 유지
 }
