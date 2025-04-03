@@ -1,5 +1,4 @@
 
-
 #define BLYNK_FIRMWARE_VERSION "0.1.1"
 
 //azuma
@@ -18,7 +17,7 @@
 // #define BLYNK_AUTH_TOKEN "YKPIppsZmdhzKvsUtAduzuG6n09vLgXm"
 
 
-//#define BLYNK_DEBUG // Blynk 디버깅 모드 활성화
+#define BLYNK_DEBUG  // Blynk 디버깅 모드 활성화
 //#define DEBUG_MODE
 #define TEST_MODE
 #define BLYNK_MODE
@@ -40,14 +39,9 @@
 #include <NTPClient.h>
 #include "CFMEGA.h"
 
-
-bool isFirstUserTemp = true;
 bool isFirstRunMode = true;
-
-bool isReadPrevModeCheck = true;     // 한번만 실행해서 자동/수동모드인지 확인
-bool isReadsetUserOpenTemp = false;  // 전의 사용자 개폐온도 읽기
-//메뉴 위젯에서 빈번한,적당한을 제외한 다른 기능을 클릭했을때 작동이 끝난후에는 빈번한,적당한 값을보여준다.
-int selectedtMenuWiget = 0;
+bool isSyncRunMode = false;          // 한번만 실행해서 자동/수동모드인지 확인
+bool isSyncSetUserOpenTemp = false;  // 전의 사용자 개폐온도 읽기
 
 bool isConnected = false;
 
@@ -266,17 +260,18 @@ void auto_menu_switch_init() {
 
 
 void setInitialMode() {
-  //기본적으로 기타기능 경우 disable 상태이므로 enable시킨다.
-  Blynk.setProperty(V126, "isDisabled", false);
+
+  //기타기능의 메뉴선택 전의 값을 가져온다.
   Blynk.syncVirtual(V126);
 
-  if (isReadPrevModeCheck) {
+  //가장먼저 자동수동 운전모드를 싱크을 해야한다.(연계된것이 많다.)
+  if (!isSyncRunMode) {
     //전의 모드값을 가져오고 AutoMOde,Menu 모드값만 가져온다.
     Blynk.syncVirtual(V127);
     unsigned long startMillis = millis();  // 시작 시간 기록
     const unsigned long timeout = 5000;    // 5초 제한
 
-    while (isReadPrevModeCheck) {
+    while (!isSyncRunMode) {
       Blynk.run();                             // Blynk 이벤트 처리 (BLYNK_WRITE 실행 가능하도록)
       if (millis() - startMillis > timeout) {  // 타임아웃 방지
         Serial.println("Blynk sync timeout!");
@@ -286,12 +281,12 @@ void setInitialMode() {
   }
 
 
-  if (!isReadsetUserOpenTemp) {
+  if (!isSyncSetUserOpenTemp) {
     Blynk.syncVirtual(V30);
     unsigned long startMillis = millis();  // 시작 시간 기록
     const unsigned long timeout = 5000;    // 5초 제한
 
-    while (!isReadsetUserOpenTemp) {
+    while (!isSyncSetUserOpenTemp) {
       Blynk.run();                             // Blynk 이벤트 처리 (BLYNK_WRITE 실행 가능하도록)
       if (millis() - startMillis > timeout) {  // 타임아웃 방지
         Serial.println("Blynk sync timeout!");
@@ -300,7 +295,22 @@ void setInitialMode() {
     }
   }
 
-  Serial.println("전의 사용자 설정온도: " + String(setUserOpenTemp) + "°C");
+  Serial.println("전의 개폐 설정온도: " + String(setUserOpenTemp) + "°C");
+  if (RUN_MODE == MANU_MODE) {
+    Serial.println("전의 운전모드: 수동 모드였습니다.");
+  } else {
+    Serial.println("전의 운전모드: 자동 모드였습니다.");
+  }
+
+  if (TempCollectionMode == tempfrequentMode) {  //빈번한 온도수집
+
+    Serial.println("전의 온도수집모드: 빈번한 온도수집입니다.");
+  } else if (TempCollectionMode == tempSometimeMode) {  //적당한 온도수집
+
+    Serial.println("전의 온도수집모드:  적당한 온도수집입니다.");
+  } else {
+    Serial.println("전의 온도수집모드:  알수 없습니다.");
+  }
 
   //전의 모드가 수동모드라면
   if (RUN_MODE == MANU_MODE) {
@@ -318,14 +328,7 @@ void setInitialMode() {
     cfnet.digitalWrite(0, LOW);
     cfnet.digitalWrite(1, LOW);
     Blynk.virtualWrite(V32, LOW);  //A,B동 공통 조명 LED
-
-    //자동,수동에 따라 연관된 위젯을 enable/disable시킴, 특히 관수타이머도 싱크한다.
-    Blynk.syncVirtual(V127);
   }
-
-  //자동,수동에 따라 연관된 위젯을  enable/disable시킴
-  //여기서 하면 auto_menu_switch_init()가 작동되서 수동제어스위치가 작동되지 않는다.
-  //Blynk.syncVirtual(V127);
 
   // 환경설정 세그먼트 스위치를 읽기 모드로 설정, 개폐온도,운전모드 disable
   Blynk.virtualWrite(V31, HIGH);
@@ -771,24 +774,15 @@ BLYNK_WRITE(V126) {
   int selectedValue = param.asInt();
 
 
-  if (selectedValue == 0 || selectedValue == 1) {
-    selectedtMenuWiget = selectedValue;
-  }
 
-  //스마트폰의 화면에 값을 세팅한다.
-  Blynk.virtualWrite(V126, selectedtMenuWiget);
+
+
 
   switch (selectedValue) {
     case 0:  //빈번한 온도수집
-#ifdef DEBUG_MODE
-      Serial.println("빈번한 온도수집");
-#endif
       TempCollectionMode = tempfrequentMode;
       break;
     case 1:
-#ifdef DEBUG_MODE
-      Serial.println("적당한 온도수집");
-#endif
       TempCollectionMode = tempSometimeMode;
       break;
     case 2:  //A동 조명 켜기
@@ -847,17 +841,7 @@ BLYNK_WRITE(V126) {
       Serial.println("B동 조명 끄기");
 #endif
       break;
-    case 6:  //A동 카메라 찍기
-#ifdef DEBUG_MODE
-      Serial.println("A동 카메라 찍기");
-#endif
-      break;
-    case 7:  //B동 카메라 찍기
-#ifdef DEBUG_MODE
-      Serial.println("B동 카메라 찍기");
-#endif
-      break;
-    case 8:  //시스탬 리부팅
+    case 6:  //시스탬 리부팅
       touchRebootCount++;
       if (touchRebootCount == 3) {
         Blynk.disconnect();
@@ -870,22 +854,14 @@ BLYNK_WRITE(V126) {
       }
       break;
   }
+  //스마트폰의 화면에 빈번한,적당한값을 항상 세팅한다.
+  Blynk.virtualWrite(V126, TempCollectionMode);
 }
 
 //측면개폐온도설정
 BLYNK_WRITE(V30) {
   setUserOpenTemp = param.asInt();
-  isReadsetUserOpenTemp = true;
-
-
-  // 온도를 바꾸면 자동으로 편집모드가 읽기모드로 변환된다.
-  if (!isFirstUserTemp) {
-    Serial.println("사용자 설정온도가 변경되었습니다: " + String(setUserOpenTemp) + "°C");
-    //자동으로 읽기모드로 변환
-    Blynk.virtualWrite(V31, HIGH);
-    Blynk.syncVirtual(V31);
-  }
-  isFirstUserTemp = false;
+  isSyncSetUserOpenTemp = true;
 }
 
 /*
@@ -901,76 +877,61 @@ BLYNK_WRITE(V30) {
 BLYNK_WRITE(V127) {
   int pinValue = param.asInt();
 
-  if (!isFirstRunMode) {
-    //변경하면 자동으로 편집모드는 읽기모드로 간다.
-    Blynk.virtualWrite(V31, HIGH);
-    Blynk.syncVirtual(V31);
-  }
-  isFirstRunMode = false;
+  if (pinValue) {
 
-
-  if (isReadPrevModeCheck) {
-    if (pinValue) {
-      RUN_MODE = MANU_MODE;
-#ifdef BLYNK_MODE
-      Serial.println("전의 운전모드가 수동이었습니다.");
-#endif
-    } else {
-      RUN_MODE = AUTO_MODE;
-#ifdef BLYNK_MODE
-      Serial.println("전의 운전모드가 자동이었습니다.");
-#endif
-    }
-    delay(10);  // 값이 설정될 시간을 확보
-    isReadPrevModeCheck = false;
-  } else {  //두번째 부터 콜을 당하면 여기서 실행된다.
-
-
-    auto_menu_switch_init();
-
-    if (pinValue) {
-
-      RUN_MODE = MANU_MODE;  //수동
-
+    RUN_MODE = MANU_MODE;  //수동
+    //부팅시 전의 모드가 수동모드일때 개폐스위치,관수스위치 sync을 하기위해 실행시키지 않는다. 한번만작동
+    if (!isFirstRunMode) {
       Blynk.setProperty(V2, "isDisabled", false);   //enable ,A동개폐스위치
       Blynk.setProperty(V6, "isDisabled", false);   //enable , A동관수스위치
       Blynk.setProperty(V20, "isDisabled", false);  //enable , B동개폐스위치
       Blynk.setProperty(V24, "isDisabled", false);  //enable, B동관수스위치
 
-      Blynk.setProperty(V7, "isDisabled", true);   //disalbe ,A동오전관수타이머
-      Blynk.setProperty(V8, "isDisabled", true);   //disalbe ,A동오후관수타이머
-      Blynk.setProperty(V25, "isDisabled", true);  //disalbe ,B동오전관수타이머
-      Blynk.setProperty(V26, "isDisabled", true);  //disalbe ,B동오후관수타이머
-
-      Blynk.setProperty(V10, "isDisabled", true);  //disable , A동자동개폐LED
-      Blynk.setProperty(V28, "isDisabled", true);  //disable, B동자동개폐LED
-
-    } else {
-
-      RUN_MODE = AUTO_MODE;                        //자동
-      Blynk.setProperty(V2, "isDisabled", true);   //disable
-      Blynk.setProperty(V6, "isDisabled", true);   //disable
-      Blynk.setProperty(V20, "isDisabled", true);  //disable
-      Blynk.setProperty(V24, "isDisabled", true);  //disable
-
-      Blynk.setProperty(V7, "isDisabled", false);   //enable
-      Blynk.setProperty(V8, "isDisabled", false);   //enable
-      Blynk.setProperty(V25, "isDisabled", false);  //enable
-      Blynk.setProperty(V26, "isDisabled", false);  //enable
-
-      //Enable 상태에서는 관수타이머 싱크을 데이타를 가져온다.
-      Blynk.syncVirtual(V7, V8, V25, V26);
-      //관수 타이머의 색깔 녹색(OFF)
-      Blynk.setProperty(V7, "color", "#006400");   //녹색 (#RRGGBB 형식)
-      Blynk.setProperty(V8, "color", "#006400");   //녹색 (#RRGGBB 형식)
-      Blynk.setProperty(V25, "color", "#006400");  //녹색 (#RRGGBB 형식)
-      Blynk.setProperty(V26, "color", "#006400");  //녹색 (#RRGGBB 형식)
-
-
-      Blynk.setProperty(V10, "isDisabled", false);  //enable , A동자동개폐LED
-      Blynk.setProperty(V28, "isDisabled", false);  //enable, B동자동개폐LED
+      auto_menu_switch_init();
     }
+
+    //관수 타이머의 색깔 녹색(OFF)
+    Blynk.setProperty(V7, "color", "#006400");   //녹색 (#RRGGBB 형식)
+    Blynk.setProperty(V8, "color", "#006400");   //녹색 (#RRGGBB 형식)
+    Blynk.setProperty(V25, "color", "#006400");  //녹색 (#RRGGBB 형식)
+    Blynk.setProperty(V26, "color", "#006400");  //녹색 (#RRGGBB 형식)
+
+    Blynk.setProperty(V7, "isDisabled", true);   //disalbe ,A동오전관수타이머
+    Blynk.setProperty(V8, "isDisabled", true);   //disalbe ,A동오후관수타이머
+    Blynk.setProperty(V25, "isDisabled", true);  //disalbe ,B동오전관수타이머
+    Blynk.setProperty(V26, "isDisabled", true);  //disalbe ,B동오후관수타이머
+
+    Blynk.setProperty(V10, "isDisabled", true);  //disable , A동자동개폐LED
+    Blynk.setProperty(V28, "isDisabled", true);  //disable, B동자동개폐LED
+
+  } else {
+
+    RUN_MODE = AUTO_MODE;  //자동
+    auto_menu_switch_init();
+    Blynk.setProperty(V2, "isDisabled", true);   //disable
+    Blynk.setProperty(V6, "isDisabled", true);   //disable
+    Blynk.setProperty(V20, "isDisabled", true);  //disable
+    Blynk.setProperty(V24, "isDisabled", true);  //disable
+
+    Blynk.setProperty(V7, "isDisabled", false);   //enable
+    Blynk.setProperty(V8, "isDisabled", false);   //enable
+    Blynk.setProperty(V25, "isDisabled", false);  //enable
+    Blynk.setProperty(V26, "isDisabled", false);  //enable
+
+
+    //Enable 상태에서는 관수타이머 싱크을 데이타를 가져온다.
+    Blynk.syncVirtual(V7, V8, V25, V26);
+    //관수 타이머의 색깔 녹색(OFF)
+    Blynk.setProperty(V7, "color", "#006400");   //녹색 (#RRGGBB 형식)
+    Blynk.setProperty(V8, "color", "#006400");   //녹색 (#RRGGBB 형식)
+    Blynk.setProperty(V25, "color", "#006400");  //녹색 (#RRGGBB 형식)
+    Blynk.setProperty(V26, "color", "#006400");  //녹색 (#RRGGBB 형식)
+
+    Blynk.setProperty(V10, "isDisabled", false);  //enable , A동자동개폐LED
+    Blynk.setProperty(V28, "isDisabled", false);  //enable, B동자동개폐LED
   }
+  isFirstRunMode = false;
+  isSyncRunMode = true;
 }
 
 //NTP요일을 Blynk요일로 변경
@@ -1200,6 +1161,7 @@ void setup() {
 
   //고정된 IP을 받기위해 Blynk.begin 아닌 Blynk.config을 사용
   Blynk.config(BLYNK_AUTH_TOKEN);  //서버 설정 (자동 연결 X)
+  Blynk.connect();
 
   /* BLYNK_CONNECTED() 에서 기본적인 초기화를 하므로 
    BLYNK_CONNECTED() 이벤트 발생까지 대기하지않고 그대로 다음단계로 가면 
