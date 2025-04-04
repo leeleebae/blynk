@@ -1,26 +1,26 @@
 
 #define BLYNK_FIRMWARE_VERSION "0.1.1"
 
-//azuma
+//azuma - 비닐하우스 타이머 데모
 #define BLYNK_TEMPLATE_ID "TMPL61b3dE3pn"
 #define BLYNK_TEMPLATE_NAME "비닐하우스 타이머 데모"
 #define BLYNK_AUTH_TOKEN "TaSQWNVxPGplRVVEScnJuU31eD7LIPGn"
 
-//hidehiko
+//hidehiko - 비닐하우스 타이머 데모
 // #define BLYNK_TEMPLATE_ID "TMPL69dh1Tbx4"
 // #define BLYNK_TEMPLATE_NAME "비닐하우스 타이머 데모"
 // #define BLYNK_AUTH_TOKEN "BQI1PMPHzfzvNFGCtjhFJizf8ik-2CFb"
 
-//leeleebae
+//leeleebae - 비닐하우스 타이머 데모
 // #define BLYNK_TEMPLATE_ID "TMPL65fzjqkFz"
 // #define BLYNK_TEMPLATE_NAME "비닐하우스 타이머 데모"
 // #define BLYNK_AUTH_TOKEN "YKPIppsZmdhzKvsUtAduzuG6n09vLgXm"
 
 
-#define BLYNK_DEBUG  // Blynk 디버깅 모드 활성화
+//#define BLYNK_DEBUG  // Blynk 디버깅 모드 활성화
 //#define DEBUG_MODE
-#define TEST_MODE
-#define BLYNK_MODE
+//#define TEST_MODE
+//#define BLYNK_MODE
 
 #define BLYNK_HEARTBEAT 30  // 30초마다 서버와 핑 체크,기본은 10초이다.
 
@@ -112,6 +112,7 @@ const unsigned long notificationTimeout = 1000 * 1;  // 10초 제한 시간
 
 BlynkTimer ntpUpdateTimer;                                 //NTP update timer
 const unsigned long ntpUpdateinterval = (1000L * 60 * 5);  //5분
+unsigned long lastNTPUpdateMillis = 0;
 // 시간 관리 변수
 unsigned long lastUpdateMillis = 0;
 unsigned long currentMillis = 0;
@@ -849,7 +850,7 @@ BLYNK_WRITE(V126) {
         logEvent_Enqueue("waringalert", "사용자가 시스탬을 강제로  리부팅합니다.");
 
         resetW5100();
-        //rebootJmp();
+        rebootArduino();
         break;
       }
       break;
@@ -1112,14 +1113,18 @@ BLYNK_CONNECTED() {
   Serial.println("-- 서버에 연결되었습니다. --");
   Serial.print("연결된 IP 주소: ");
   Serial.println(Ethernet.localIP());  // Ethernet 모듈의 IP 출력
+#ifdef BLYNK_MODE
   logEvent_Enqueue("infoalert", "서버와 연결되었습니다.");
+#endif
   setInitialMode();
 }
 
 // 아두이노 메가 소프트웨어 재부팅 함수
-void rebootJmp() {
-  Serial.println("시스탬을 rebootJmp 시킵니다.");
-  asm volatile("  jmp 0");  // 메가의 프로그램 카운터를 0으로 강제 이동
+void rebootArduino() {
+  Serial.println("시스탬을 rebootArduino 시킵니다.");
+  //asm volatile("  jmp 0");  // 메가의 프로그램 카운터를 0으로 강제 이동
+  void (*resetFunc)(void) = 0;  // 주소 0으로 점프 → 전체 리부팅
+  resetFunc();                  // 호출하면 시스템 재시작
 }
 
 void resetW5100() {
@@ -1137,19 +1142,23 @@ void checkConnection() {
 
     Serial.println("연결이 끊어져서 시스탬을 강제로  리부팅합니다.");
     Blynk.disconnect();
-    logEvent_Enqueue("waringalert", "연결이 끊어져서 시스탬을 강제로  리부팅합니다.");
-    resetW5100();
-    //rebootJmp();
+    //resetW5100();
+    rebootArduino();
   }
 }
 
 void ntpUpateTime() {
 
+  // millis() 기반 NTP 시간 갱신
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastNTPUpdateMillis >= ntpUpdateinterval) {
+    lastNTPUpdateMillis = currentMillis;
 #ifdef DEBUG_MODE
-  Serial.println("NTP 업데이트 중...");
+    Serial.println("NTP 업데이트 중...");
 #endif
-  timeClient.update();
-  elapsedSeconds = timeClient.getEpochTime();
+    timeClient.update();
+    elapsedSeconds = timeClient.getEpochTime();
+  }
 }
 
 void setup() {
@@ -1182,21 +1191,33 @@ void setup() {
   dhtA.begin();
   dhtB.begin();
 
-  ntpUpdateTimer.setInterval(ntpUpdateinterval, ntpUpateTime);                  // 5분마다 NTP업데이트
-  connectionTimer.setInterval(connectionCheckinterval, checkConnection);        // 1초마다 연결 상태 확인
-  blnklogEventTimer.setInterval(blnklogEventTimerinterval, processEventQueue);  // 2초마다 실행
+  //ntpUpdateTimer.setInterval(ntpUpdateinterval, ntpUpateTime);  // 5분마다 NTP업데이트
+  //connectionTimer.setInterval(connectionCheckinterval, checkConnection);        // 1초마다 연결 상태 확인
+  //blnklogEventTimer.setInterval(blnklogEventTimerinterval, processEventQueue);  // 2초마다 실행
 }
 
 void loop() {
 
-  Blynk.run();
+  if (Blynk.connected()) {
+    Blynk.run();  // 서버에 연결되어 있을 때만 실행
+  } else {
+    Serial.println("연결이 끊어져서 시스탬을 강제로  리부팅합니다.");
+    Blynk.disconnect();
+    //resetW5100();
+    rebootArduino();
+  }
+
   Ethernet.maintain();  // W5100 이더넷 연결 유지
-  ntpUpdateTimer.run();
-  connectionTimer.run();
-  blnklogEventTimer.run();
 
   sensorBaeJoneBan();
   sendSensorAHouse();
   sendSensorBHouse();
   waterTimeSchedule();
+
+  processEventQueue();
+  ntpUpateTime();
+
+  //ntpUpdateTimer.run();
+  //connectionTimer.run();
+  //blnklogEventTimer.run();
 }
