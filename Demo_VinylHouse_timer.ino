@@ -30,14 +30,18 @@
 #define DHTPINB 8      //  B동 DHT22 센서가 연결 된 핀 번호
 #define DHTTYPE DHT22  //  DHT22 센서 사용   (DHT22 센서는 DHT22로 수정, DHT11일경우 DHT11)
 
-#define W5100_RESET_PIN 12  // W5100의 RESET 핀 (D12에 연결)
+#define W5100_RESET_PIN 12   // W5100의 RESET 핀 (D12에 연결)
+#define W5100_MEGA_CSPIN 53  //MEGA 와 w5100핀의 CS핀
 
 #include <SPI.h>
 #include <Ethernet.h>
+#include <utility/w5100.h>  // Ethernet 라이브러리에 포함됨
 #include <BlynkSimpleEthernet.h>
 #include <DHT.h>
 #include <NTPClient.h>
+#include <avr/wdt.h>  // Watchdog Timer 라이브러리 (AVR 전용)
 #include "CFMEGA.h"
+
 
 bool isFirstRunMode = true;
 bool isSyncRunMode = false;          // 한번만 실행해서 자동/수동모드인지 확인
@@ -846,12 +850,10 @@ BLYNK_WRITE(V126) {
       touchRebootCount++;
       if (touchRebootCount == 3) {
         Blynk.disconnect();
-
-        logEvent_Enqueue("waringalert", "사용자가 시스탬을 강제로  리부팅합니다.");
-
+        //resetCspinMega();
         resetW5100();
-        rebootArduino();
-        break;
+        //rebootArduino();
+        //rebootSystem();  //Watchdog Timer 리셋
       }
       break;
   }
@@ -1122,30 +1124,51 @@ BLYNK_CONNECTED() {
 // 아두이노 메가 소프트웨어 재부팅 함수
 void rebootArduino() {
   Serial.println("시스탬을 rebootArduino 시킵니다.");
-  //asm volatile("  jmp 0");  // 메가의 프로그램 카운터를 0으로 강제 이동
   void (*resetFunc)(void) = 0;  // 주소 0으로 점프 → 전체 리부팅
   resetFunc();                  // 호출하면 시스템 재시작
+}
+// 아두이노 메가 소프트웨어 재부팅 함수 -- Watchdog Timer 리셋
+void rebootSystem() {
+  wdt_enable(WDTO_15MS);  // 15ms 후 강제 리셋
+  while (1)
+    ;  // 무한 루프로 리셋 유도
 }
 
 void resetW5100() {
   Serial.println("시스탬을 reset 시킵니다.");
+  delay(500);
   pinMode(W5100_RESET_PIN, OUTPUT);
   digitalWrite(W5100_RESET_PIN, LOW);   // W5100 전원 끄기
   delay(500);                           // 0.5초 대기
   digitalWrite(W5100_RESET_PIN, HIGH);  // W5100 전원 켜기
   delay(1000);                          // 안정화 시간 대기
-}
 
+  // W5100 다시 초기화
+  Ethernet.begin(mac, ip);
+  delay(500);
 
-void checkConnection() {
-  if (!Blynk.connected()) {
-
-    Serial.println("연결이 끊어져서 시스탬을 강제로  리부팅합니다.");
-    Blynk.disconnect();
-    //resetW5100();
-    rebootArduino();
+  // 연결 상태 확인
+  if (Ethernet.hardwareStatus() == EthernetNoHardware) {
+    Serial.println("W5100 감지 안됨!");
+  } else if (Ethernet.linkStatus() == LinkOFF) {
+    Serial.println("네트워크 연결이 끊어짐! 다시 시도 중...");
+  } else {
+    Serial.println("W5100 정상 작동 중!");
   }
 }
+
+void resetCspinMega() {
+  Serial.println("W5100_MEGA_CSPIN 리셋 중...");
+  pinMode(W5100_MEGA_CSPIN, OUTPUT);  // CS 핀 (Mega2560은 53번)
+  digitalWrite(W5100_MEGA_CSPIN, HIGH);
+  delay(100);
+  digitalWrite(W5100_MEGA_CSPIN, LOW);
+  delay(100);
+  digitalWrite(W5100_MEGA_CSPIN, HIGH);
+  delay(500);
+  Serial.println("W5100_MEGA_CSPIN 리셋 완료!");
+}
+
 
 void ntpUpateTime() {
 
@@ -1162,15 +1185,18 @@ void ntpUpateTime() {
 }
 
 void setup() {
-
   Serial.begin(115200);
+  //pinMode(W5100_RESET_PIN, OUTPUT);
+  //digitalWrite(W5100_RESET_PIN, HIGH);  // 기본적으로 RESET 핀 HIGH 유지 (정상 동작)
+
   Ethernet.begin(mac, ip);  // Ethernet 초기화
+  delay(1000);              // 네트워크 안정화 대기
   Serial.print("고정된 IP 주소: ");
   Serial.println(Ethernet.localIP());  // Ethernet 모듈의 IP 출력
 
   //고정된 IP을 받기위해 Blynk.begin 아닌 Blynk.config을 사용
   Blynk.config(BLYNK_AUTH_TOKEN);  //서버 설정 (자동 연결 X)
-  Blynk.connect();
+  Blynk.connect(5000);
 
   /* BLYNK_CONNECTED() 에서 기본적인 초기화를 하므로 
    BLYNK_CONNECTED() 이벤트 발생까지 대기하지않고 그대로 다음단계로 가면 
@@ -1198,21 +1224,23 @@ void setup() {
 
 void loop() {
 
-  if (Blynk.connected()) {
-    Blynk.run();  // 서버에 연결되어 있을 때만 실행
-  } else {
-    Serial.println("연결이 끊어져서 시스탬을 강제로  리부팅합니다.");
+  if (!Blynk.connected()) {
     Blynk.disconnect();
-    //resetW5100();
-    rebootArduino();
+    resetW5100();
+    //rebootArduino();
+    //resetCspinMega();
+    //rebootSystem();  // Watchdog Timer 리셋
   }
 
+  Blynk.run();          // 서버에 연결되어 있을 때만 실행
   Ethernet.maintain();  // W5100 이더넷 연결 유지
+
 
   sensorBaeJoneBan();
   sendSensorAHouse();
   sendSensorBHouse();
   waterTimeSchedule();
+
 
   processEventQueue();
   ntpUpateTime();
